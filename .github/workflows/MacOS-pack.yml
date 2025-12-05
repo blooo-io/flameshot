@@ -231,14 +231,22 @@ jobs:
           mv "${DIR_BUILD}/src/Flameshot-${{ env.VERSION }}.dmg" \
              "${DIR_BUILD}/src/Flameshot-${{ env.VERSION }}-${{ matrix.dist.arch }}.dmg"
 
+      # Set release tag name (release/v13.3.0-signed -> v13.3.0-b-signed)
+      - name: Set Release Tag
+        if: startsWith(github.ref, 'refs/heads/release/')
+        run: |
+          # Extract version from branch: release/v13.3.0-signed -> v13.3.0
+          VERSION_TAG=$(echo "${{ github.ref_name }}" | sed 's|release/||' | sed 's/-signed$//')
+          # Create release tag: v13.3.0-b-signed
+          echo "RELEASE_TAG=${VERSION_TAG}-b-signed" >> $GITHUB_ENV
+
       # Upload to GitHub Release (only for release branches)
       - name: Upload to GitHub Release
         if: startsWith(github.ref, 'refs/heads/release/')
         uses: softprops/action-gh-release@v2
         with:
-          # Extract version from branch name (release/v13.3.0-signed -> v13.3.0-signed)
-          tag_name: ${{ github.ref_name }}
-          name: "Flameshot ${{ github.ref_name }} (Signed macOS)"
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: "Flameshot ${{ env.RELEASE_TAG }} (Signed macOS)"
           draft: false
           prerelease: false
           generate_release_notes: false
