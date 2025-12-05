@@ -110,62 +110,68 @@ jobs:
         run: cmake --build "${DIR_BUILD}"
 
       # ══════════════════════════════════════════════════════════════════════
-      # CODE SIGNING STEPS (uncomment when secrets are configured)
+      # CODE SIGNING STEPS
       # ══════════════════════════════════════════════════════════════════════
       
-      # - name: Import Code Signing Certificate
-      #   env:
-      #     MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
-      #     MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
-      #     KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
-      #   run: |
-      #     CERTIFICATE_PATH=$RUNNER_TEMP/build_certificate.p12
-      #     KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
-      #     echo -n "$MACOS_CERTIFICATE" | base64 --decode -o $CERTIFICATE_PATH
-      #     security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
-      #     security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
-      #     security default-keychain -s $KEYCHAIN_PATH
-      #     security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
-      #     security import $CERTIFICATE_PATH -P "$MACOS_CERTIFICATE_PWD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
-      #     security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+      - name: Import Code Signing Certificate
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          CERTIFICATE_PATH=$RUNNER_TEMP/build_certificate.p12
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          echo -n "$MACOS_CERTIFICATE" | base64 --decode -o $CERTIFICATE_PATH
+          security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
+          security default-keychain -s $KEYCHAIN_PATH
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          security import $CERTIFICATE_PATH -P "$MACOS_CERTIFICATE_PWD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          # List available signing identities (for debugging)
+          security find-identity -v -p codesigning
 
-      # - name: Code Sign Application
-      #   env:
-      #     MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
-      #   run: |
-      #     codesign --deep --force --verify --verbose \
-      #       --sign "$MACOS_SIGNING_IDENTITY" \
-      #       --options runtime \
-      #       --timestamp \
-      #       "${DIR_BUILD}/src/${APP_NAME}.app"
+      - name: Code Sign Application
+        env:
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+        run: |
+          codesign --deep --force --verify --verbose \
+            --sign "$MACOS_SIGNING_IDENTITY" \
+            --options runtime \
+            --timestamp \
+            "${DIR_BUILD}/src/${APP_NAME}.app"
+          # Verify signature
+          codesign --verify --verbose=4 "${DIR_BUILD}/src/${APP_NAME}.app"
 
-      # - name: Notarize Application
-      #   env:
-      #     MACOS_NOTARIZATION_APPLE_ID: ${{ secrets.MACOS_NOTARIZATION_APPLE_ID }}
-      #     MACOS_NOTARIZATION_PWD: ${{ secrets.MACOS_NOTARIZATION_PWD }}
-      #     MACOS_NOTARIZATION_TEAM_ID: ${{ secrets.MACOS_NOTARIZATION_TEAM_ID }}
-      #   run: |
-      #     ditto -c -k --keepParent "${DIR_BUILD}/src/${APP_NAME}.app" "${DIR_BUILD}/src/${APP_NAME}.zip"
-      #     xcrun notarytool submit "${DIR_BUILD}/src/${APP_NAME}.zip" \
-      #       --apple-id "$MACOS_NOTARIZATION_APPLE_ID" \
-      #       --password "$MACOS_NOTARIZATION_PWD" \
-      #       --team-id "$MACOS_NOTARIZATION_TEAM_ID" \
-      #       --wait
-      #     xcrun stapler staple "${DIR_BUILD}/src/${APP_NAME}.app"
-      #     rm "${DIR_BUILD}/src/${APP_NAME}.zip"
+      - name: Notarize Application
+        env:
+          MACOS_NOTARIZATION_APPLE_ID: ${{ secrets.MACOS_NOTARIZATION_APPLE_ID }}
+          MACOS_NOTARIZATION_PWD: ${{ secrets.MACOS_NOTARIZATION_PWD }}
+          MACOS_NOTARIZATION_TEAM_ID: ${{ secrets.MACOS_NOTARIZATION_TEAM_ID }}
+        run: |
+          ditto -c -k --keepParent "${DIR_BUILD}/src/${APP_NAME}.app" "${DIR_BUILD}/src/${APP_NAME}.zip"
+          xcrun notarytool submit "${DIR_BUILD}/src/${APP_NAME}.zip" \
+            --apple-id "$MACOS_NOTARIZATION_APPLE_ID" \
+            --password "$MACOS_NOTARIZATION_PWD" \
+            --team-id "$MACOS_NOTARIZATION_TEAM_ID" \
+            --wait
+          xcrun stapler staple "${DIR_BUILD}/src/${APP_NAME}.app"
+          rm "${DIR_BUILD}/src/${APP_NAME}.zip"
 
       - name: Build DMG package
         run: |
           cd "${DIR_BUILD}"
           ninja create_dmg
 
-      # - name: Code Sign DMG
-      #   env:
-      #     MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
-      #   run: |
-      #     codesign --force --verify --verbose \
-      #       --sign "$MACOS_SIGNING_IDENTITY" \
-      #       "${DIR_BUILD}/src/Flameshot-${{ env.VERSION }}.dmg"
+      - name: Code Sign DMG
+        env:
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+        run: |
+          codesign --force --verify --verbose \
+            --sign "$MACOS_SIGNING_IDENTITY" \
+            "${DIR_BUILD}/src/Flameshot-${{ env.VERSION }}.dmg"
+          # Verify DMG signature
+          codesign --verify --verbose=4 "${DIR_BUILD}/src/Flameshot-${{ env.VERSION }}.dmg"
 
       - name: Rename DMG for Release
         run: |
@@ -178,17 +184,23 @@ jobs:
           name: flameshot-${{ env.RELEASE_TAG }}-macos-${{ matrix.dist.arch }}
           path: ${{ github.workspace }}/build/src/Flameshot-${{ env.VERSION }}-${{ matrix.dist.arch }}.dmg
 
+      - name: Cleanup Keychain
+        if: always()
+        run: |
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          security delete-keychain $KEYCHAIN_PATH || true
+
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          name: "Flameshot ${{ env.RELEASE_TAG }} (macOS)"
+          name: "Flameshot ${{ env.RELEASE_TAG }} (macOS Signed)"
           draft: false
           prerelease: false
           body: |
-            ## macOS Build
+            ## macOS Signed Build ✅
             
-            This is a macOS build of Flameshot based on the official release **${{ env.UPSTREAM_TAG }}**.
+            This is a **signed and notarized** macOS build of Flameshot based on the official release **${{ env.UPSTREAM_TAG }}**.
             
             **Base version:** ${{ env.VERSION }}
             **Upstream release:** https://github.com/${{ env.UPSTREAM_REPO }}/releases/tag/${{ env.UPSTREAM_TAG }}
@@ -196,6 +208,12 @@ jobs:
             ### Downloads
             - `Flameshot-${{ env.VERSION }}-arm64.dmg` - Apple Silicon (M1/M2/M3)
             - `Flameshot-${{ env.VERSION }}-intel.dmg` - Intel Macs
+            
+            ### Verification
+            These packages are:
+            - ✅ Code signed with Developer ID certificate
+            - ✅ Notarized by Apple
+            - ✅ Ready to install without Gatekeeper warnings
             
             ---
             *Built automatically from upstream release*
