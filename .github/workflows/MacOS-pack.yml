@@ -224,3 +224,36 @@ jobs:
           name: ${{ env.PRODUCT }}-${{ env.VER_INFO }}-artifact-macos-${{ matrix.dist.arch }}
           path: ${{ github.workspace }}/build/src/Flameshot-${{ env.VERSION }}.dmg
           overwrite: true
+
+      # Rename DMG to include architecture for release
+      - name: Rename DMG for Release
+        run: |
+          mv "${DIR_BUILD}/src/Flameshot-${{ env.VERSION }}.dmg" \
+             "${DIR_BUILD}/src/Flameshot-${{ env.VERSION }}-${{ matrix.dist.arch }}.dmg"
+
+      # Upload to GitHub Release (only for release branches)
+      - name: Upload to GitHub Release
+        if: startsWith(github.ref, 'refs/heads/release/')
+        uses: softprops/action-gh-release@v2
+        with:
+          # Extract version from branch name (release/v13.3.0-signed -> v13.3.0-signed)
+          tag_name: ${{ github.ref_name }}
+          name: "Flameshot ${{ github.ref_name }} (Signed macOS)"
+          draft: false
+          prerelease: false
+          generate_release_notes: false
+          body: |
+            ## macOS Signed Build
+            
+            This is a signed macOS build of Flameshot based on the official release.
+            
+            **Base version:** ${{ env.VERSION }}
+            **Commit:** ${{ env.GIT_HASH }}
+            
+            ### Downloads
+            - `Flameshot-${{ env.VERSION }}-arm64.dmg` - Apple Silicon (M1/M2/M3)
+            - `Flameshot-${{ env.VERSION }}-intel.dmg` - Intel Macs
+          files: |
+            ${{ github.workspace }}/build/src/Flameshot-${{ env.VERSION }}-${{ matrix.dist.arch }}.dmg
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
