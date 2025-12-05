@@ -1,0 +1,206 @@
+name: Sync Upstream Release
+
+# Automatically check for new upstream releases and build signed macOS packages
+on:
+  # Run daily at 6:00 AM UTC
+  schedule:
+    - cron: '0 6 * * *'
+  
+  # Allow manual trigger
+  workflow_dispatch:
+    inputs:
+      force_version:
+        description: 'Force build a specific version (e.g., v13.3.0). Leave empty to auto-detect latest.'
+        required: false
+        default: ''
+
+env:
+  UPSTREAM_REPO: flameshot-org/flameshot
+
+jobs:
+  check-upstream:
+    name: Check for new upstream release
+    runs-on: ubuntu-latest
+    outputs:
+      new_release: ${{ steps.check.outputs.new_release }}
+      upstream_tag: ${{ steps.check.outputs.upstream_tag }}
+      release_tag: ${{ steps.check.outputs.release_tag }}
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Check for new upstream release
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Get the version to build (either forced or latest from upstream)
+          if [ -n "${{ github.event.inputs.force_version }}" ]; then
+            UPSTREAM_TAG="${{ github.event.inputs.force_version }}"
+            echo "Using forced version: $UPSTREAM_TAG"
+          else
+            # Get latest release tag from upstream
+            UPSTREAM_TAG=$(gh release view --repo ${{ env.UPSTREAM_REPO }} --json tagName -q '.tagName')
+            echo "Latest upstream release: $UPSTREAM_TAG"
+          fi
+          
+          # Our signed release tag format: v13.3.0 -> v13.3.0-b-signed
+          RELEASE_TAG="${UPSTREAM_TAG}-b-signed"
+          
+          echo "upstream_tag=$UPSTREAM_TAG" >> $GITHUB_OUTPUT
+          echo "release_tag=$RELEASE_TAG" >> $GITHUB_OUTPUT
+          
+          # Check if we already have this release
+          if gh release view "$RELEASE_TAG" --repo ${{ github.repository }} &>/dev/null; then
+            echo "Release $RELEASE_TAG already exists. Skipping build."
+            echo "new_release=false" >> $GITHUB_OUTPUT
+          else
+            echo "New release detected! Will build $RELEASE_TAG"
+            echo "new_release=true" >> $GITHUB_OUTPUT
+          fi
+
+  build-macos:
+    name: Build dmg on ${{ matrix.dist.os }} ${{ matrix.dist.arch }}
+    needs: check-upstream
+    if: needs.check-upstream.outputs.new_release == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        dist:
+          - { os: macos-14, arch: arm64 }
+          - { os: macos-13, arch: intel }
+    runs-on: ${{ matrix.dist.os }}
+    env:
+      APP_NAME: flameshot
+      DIR_BUILD: build
+      UPSTREAM_TAG: ${{ needs.check-upstream.outputs.upstream_tag }}
+      RELEASE_TAG: ${{ needs.check-upstream.outputs.release_tag }}
+    
+    steps:
+      - name: Checkout upstream release tag
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.UPSTREAM_REPO }}
+          ref: ${{ env.UPSTREAM_TAG }}
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Set env & Print flameshot version
+        run: |
+          echo "=======FLAMESHOT VERSION========"
+          echo "Upstream tag: ${{ env.UPSTREAM_TAG }}"
+          echo "Release tag: ${{ env.RELEASE_TAG }}"
+          echo "================================"
+          # Extract version from CMakeLists.txt
+          echo "VERSION=$(cat CMakeLists.txt | grep 'set.*(.*FLAMESHOT_VERSION' | sed 's/[^0-9.]*//' | sed 's/)//g')" >> $GITHUB_ENV
+
+      - name: Install Qt
+        run: brew install qt@6
+
+      - name: Configure
+        run: |
+          rm -rf "${DIR_BUILD}"/src/flameshot.dmg "${DIR_BUILD}"/src/flameshot.app/
+          cmake -GNinja -S . -B "${DIR_BUILD}" -DQt6_DIR=$(brew --prefix qt6)/lib/cmake/Qt6 -DUSE_MONOCHROME_ICON=True
+
+      - name: Compile
+        run: cmake --build "${DIR_BUILD}"
+
+      # ══════════════════════════════════════════════════════════════════════
+      # CODE SIGNING STEPS (uncomment when secrets are configured)
+      # ══════════════════════════════════════════════════════════════════════
+      
+      # - name: Import Code Signing Certificate
+      #   env:
+      #     MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+      #     MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
+      #     KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+      #   run: |
+      #     CERTIFICATE_PATH=$RUNNER_TEMP/build_certificate.p12
+      #     KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+      #     echo -n "$MACOS_CERTIFICATE" | base64 --decode -o $CERTIFICATE_PATH
+      #     security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+      #     security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
+      #     security default-keychain -s $KEYCHAIN_PATH
+      #     security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+      #     security import $CERTIFICATE_PATH -P "$MACOS_CERTIFICATE_PWD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
+      #     security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+
+      # - name: Code Sign Application
+      #   env:
+      #     MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+      #   run: |
+      #     codesign --deep --force --verify --verbose \
+      #       --sign "$MACOS_SIGNING_IDENTITY" \
+      #       --options runtime \
+      #       --timestamp \
+      #       "${DIR_BUILD}/src/${APP_NAME}.app"
+
+      # - name: Notarize Application
+      #   env:
+      #     MACOS_NOTARIZATION_APPLE_ID: ${{ secrets.MACOS_NOTARIZATION_APPLE_ID }}
+      #     MACOS_NOTARIZATION_PWD: ${{ secrets.MACOS_NOTARIZATION_PWD }}
+      #     MACOS_NOTARIZATION_TEAM_ID: ${{ secrets.MACOS_NOTARIZATION_TEAM_ID }}
+      #   run: |
+      #     ditto -c -k --keepParent "${DIR_BUILD}/src/${APP_NAME}.app" "${DIR_BUILD}/src/${APP_NAME}.zip"
+      #     xcrun notarytool submit "${DIR_BUILD}/src/${APP_NAME}.zip" \
+      #       --apple-id "$MACOS_NOTARIZATION_APPLE_ID" \
+      #       --password "$MACOS_NOTARIZATION_PWD" \
+      #       --team-id "$MACOS_NOTARIZATION_TEAM_ID" \
+      #       --wait
+      #     xcrun stapler staple "${DIR_BUILD}/src/${APP_NAME}.app"
+      #     rm "${DIR_BUILD}/src/${APP_NAME}.zip"
+
+      - name: Build DMG package
+        run: |
+          cd "${DIR_BUILD}"
+          ninja create_dmg
+
+      # - name: Code Sign DMG
+      #   env:
+      #     MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+      #   run: |
+      #     codesign --force --verify --verbose \
+      #       --sign "$MACOS_SIGNING_IDENTITY" \
+      #       "${DIR_BUILD}/src/Flameshot-${{ env.VERSION }}.dmg"
+
+      - name: Rename DMG for Release
+        run: |
+          mv "${DIR_BUILD}/src/Flameshot-${{ env.VERSION }}.dmg" \
+             "${DIR_BUILD}/src/Flameshot-${{ env.VERSION }}-${{ matrix.dist.arch }}.dmg"
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: flameshot-${{ env.RELEASE_TAG }}-macos-${{ matrix.dist.arch }}
+          path: ${{ github.workspace }}/build/src/Flameshot-${{ env.VERSION }}-${{ matrix.dist.arch }}.dmg
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: "Flameshot ${{ env.RELEASE_TAG }} (macOS)"
+          draft: false
+          prerelease: false
+          body: |
+            ## macOS Build
+            
+            This is a macOS build of Flameshot based on the official release **${{ env.UPSTREAM_TAG }}**.
+            
+            **Base version:** ${{ env.VERSION }}
+            **Upstream release:** https://github.com/${{ env.UPSTREAM_REPO }}/releases/tag/${{ env.UPSTREAM_TAG }}
+            
+            ### Downloads
+            - `Flameshot-${{ env.VERSION }}-arm64.dmg` - Apple Silicon (M1/M2/M3)
+            - `Flameshot-${{ env.VERSION }}-intel.dmg` - Intel Macs
+            
+            ---
+            *Built automatically from upstream release*
+          files: |
+            ${{ github.workspace }}/build/src/Flameshot-${{ env.VERSION }}-${{ matrix.dist.arch }}.dmg
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+

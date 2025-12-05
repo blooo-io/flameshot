@@ -1,9 +1,13 @@
 name: Packaging(MacOS)
 
 on:
+  # Trigger on release branches (for signed builds)
   push:
     branches:
       - master
+      - 'release/**'        # Trigger on release/v12.1.0-signed etc.
+    tags:
+      - 'v*'                # Trigger on version tags (v12.1.0, etc.)
     paths-ignore:
       - 'README.md'
       - 'LICENSE'
@@ -17,6 +21,11 @@ on:
       - 'data/translations/*.ts'
 
   workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref to build (branch, tag, or SHA)'
+        required: false
+        default: ''
 
 env:
   PRODUCT: flameshot
@@ -86,10 +95,128 @@ jobs:
         run: |
           cmake --build "${DIR_BUILD}"
 
+      # Import the code signing certificate from GitHub Secrets
+      # This step creates a temporary keychain and imports the certificate
+      # - name: Import Code Signing Certificate
+      #   if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+      #   env:
+      #     # Base64 encoded .p12 certificate file (set in repository secrets)
+      #     MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+      #     # Password for the .p12 certificate (set in repository secrets)
+      #     MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
+      #     # Keychain password for the temporary keychain
+      #     KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+      #   run: |
+      #     # Create variables for certificate and keychain paths
+      #     CERTIFICATE_PATH=$RUNNER_TEMP/build_certificate.p12
+      #     KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          
+      #     # Decode the base64 certificate and save it to a file
+      #     echo -n "$MACOS_CERTIFICATE" | base64 --decode -o $CERTIFICATE_PATH
+          
+      #     # Create a temporary keychain
+      #     security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          
+      #     # Set the temporary keychain as the default keychain
+      #     security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
+      #     security default-keychain -s $KEYCHAIN_PATH
+          
+      #     # Unlock the keychain to allow signing operations
+      #     security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          
+      #     # Import the certificate into the keychain
+      #     # -T /usr/bin/codesign allows codesign to access the certificate without prompting
+      #     security import $CERTIFICATE_PATH -P "$MACOS_CERTIFICATE_PWD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
+          
+      #     # Set key partition list to allow codesign to access the certificate
+      #     security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          
+      #     # List available signing identities (useful for debugging)
+      #     security find-identity -v -p codesigning
+
+      # # Sign the application bundle with the imported certificate
+      # # This ensures the app is recognized as coming from a verified developer
+      # - name: Code Sign Application
+      #   if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+      #   env:
+      #     # The identity name from your Developer ID Application certificate
+      #     # Format: "Developer ID Application: Your Name (TEAM_ID)"
+      #     MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+      #   run: |
+      #     # Sign the .app bundle with hardened runtime and timestamp
+      #     # --deep signs all nested code (frameworks, plugins, etc.)
+      #     # --force replaces any existing signature
+      #     # --options runtime enables hardened runtime (required for notarization)
+      #     # --timestamp adds a secure timestamp from Apple's servers
+      #     codesign --deep --force --verify --verbose \
+      #       --sign "$MACOS_SIGNING_IDENTITY" \
+      #       --options runtime \
+      #       --timestamp \
+      #       "${DIR_BUILD}/src/${APP_NAME}.app"
+          
+      #     # Verify the signature was applied correctly
+      #     codesign --verify --verbose=4 "${DIR_BUILD}/src/${APP_NAME}.app"
+          
+      #     # Display detailed signature information
+      #     codesign -dvv "${DIR_BUILD}/src/${APP_NAME}.app"
+
+      # # Optional: Notarize the application with Apple
+      # # Notarization is required for apps distributed outside the Mac App Store
+      # # to avoid Gatekeeper warnings on macOS 10.15+
+      # - name: Notarize Application
+      #   if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+      #   env:
+      #     # Apple ID email for notarization
+      #     MACOS_NOTARIZATION_APPLE_ID: ${{ secrets.MACOS_NOTARIZATION_APPLE_ID }}
+      #     # App-specific password (not your regular Apple ID password)
+      #     # Generate at: appleid.apple.com > Sign-In and Security > App-Specific Passwords
+      #     MACOS_NOTARIZATION_PWD: ${{ secrets.MACOS_NOTARIZATION_PWD }}
+      #     # Your Team ID (found in App Store Connect or Developer Portal)
+      #     MACOS_NOTARIZATION_TEAM_ID: ${{ secrets.MACOS_NOTARIZATION_TEAM_ID }}
+      #   run: |
+      #     # Create a ZIP archive of the app for notarization submission
+      #     ditto -c -k --keepParent "${DIR_BUILD}/src/${APP_NAME}.app" "${DIR_BUILD}/src/${APP_NAME}.zip"
+          
+      #     # Submit the app for notarization using xcrun notarytool
+      #     # This replaces the deprecated altool command
+      #     xcrun notarytool submit "${DIR_BUILD}/src/${APP_NAME}.zip" \
+      #       --apple-id "$MACOS_NOTARIZATION_APPLE_ID" \
+      #       --password "$MACOS_NOTARIZATION_PWD" \
+      #       --team-id "$MACOS_NOTARIZATION_TEAM_ID" \
+      #       --wait
+          
+      #     # Staple the notarization ticket to the app bundle
+      #     # This allows the app to be validated offline
+      #     xcrun stapler staple "${DIR_BUILD}/src/${APP_NAME}.app"
+          
+      #     # Clean up the ZIP file
+      #     rm "${DIR_BUILD}/src/${APP_NAME}.zip"
+
       - name: Build dmg package
         run: |
           cd "${DIR_BUILD}"
           ninja create_dmg
+      
+      # # Sign the DMG file after creation (disabled for testing)
+      # - name: Code Sign DMG
+      #   if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+      #   env:
+      #     MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+      #   run: |
+      #     # Sign the DMG file
+      #     codesign --force --verify --verbose \
+      #       --sign "$MACOS_SIGNING_IDENTITY" \
+      #       "${DIR_BUILD}/src/Flameshot-${{ env.VERSION }}.dmg"
+      #     
+      #     # Verify the DMG signature
+      #     codesign --verify --verbose=4 "${DIR_BUILD}/src/Flameshot-${{ env.VERSION }}.dmg"
+
+      # # Clean up: Remove the temporary keychain to avoid conflicts in future runs
+      # - name: Cleanup Keychain
+      #   if: always() && github.event_name == 'push' && github.ref == 'refs/heads/master'
+      #   run: |
+      #     KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+      #     security delete-keychain $KEYCHAIN_PATH || true
 
       - name: Artifact Upload
         uses: actions/upload-artifact@v4
@@ -97,3 +224,44 @@ jobs:
           name: ${{ env.PRODUCT }}-${{ env.VER_INFO }}-artifact-macos-${{ matrix.dist.arch }}
           path: ${{ github.workspace }}/build/src/Flameshot-${{ env.VERSION }}.dmg
           overwrite: true
+
+      # Rename DMG to include architecture for release
+      - name: Rename DMG for Release
+        run: |
+          mv "${DIR_BUILD}/src/Flameshot-${{ env.VERSION }}.dmg" \
+             "${DIR_BUILD}/src/Flameshot-${{ env.VERSION }}-${{ matrix.dist.arch }}.dmg"
+
+      # Set release tag name (release/v13.3.0-signed -> v13.3.0-b-signed)
+      - name: Set Release Tag
+        if: startsWith(github.ref, 'refs/heads/release/')
+        run: |
+          # Extract version from branch: release/v13.3.0-signed -> v13.3.0
+          VERSION_TAG=$(echo "${{ github.ref_name }}" | sed 's|release/||' | sed 's/-signed$//')
+          # Create release tag: v13.3.0-b-signed
+          echo "RELEASE_TAG=${VERSION_TAG}-b-signed" >> $GITHUB_ENV
+
+      # Upload to GitHub Release (only for release branches)
+      - name: Upload to GitHub Release
+        if: startsWith(github.ref, 'refs/heads/release/')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: "Flameshot ${{ env.RELEASE_TAG }} (Signed macOS)"
+          draft: false
+          prerelease: false
+          generate_release_notes: false
+          body: |
+            ## macOS Signed Build
+            
+            This is a signed macOS build of Flameshot based on the official release.
+            
+            **Base version:** ${{ env.VERSION }}
+            **Commit:** ${{ env.GIT_HASH }}
+            
+            ### Downloads
+            - `Flameshot-${{ env.VERSION }}-arm64.dmg` - Apple Silicon (M1/M2/M3)
+            - `Flameshot-${{ env.VERSION }}-intel.dmg` - Intel Macs
+          files: |
+            ${{ github.workspace }}/build/src/Flameshot-${{ env.VERSION }}-${{ matrix.dist.arch }}.dmg
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
