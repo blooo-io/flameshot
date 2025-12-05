@@ -144,19 +144,36 @@ jobs:
           codesign --verify --verbose=4 "${DIR_BUILD}/src/${APP_NAME}.app"
 
       - name: Notarize Application
+        id: notarize
+        continue-on-error: true
+        timeout-minutes: 20
         env:
           MACOS_NOTARIZATION_APPLE_ID: ${{ secrets.MACOS_NOTARIZATION_APPLE_ID }}
           MACOS_NOTARIZATION_PWD: ${{ secrets.MACOS_NOTARIZATION_PWD }}
           MACOS_NOTARIZATION_TEAM_ID: ${{ secrets.MACOS_NOTARIZATION_TEAM_ID }}
         run: |
           ditto -c -k --keepParent "${DIR_BUILD}/src/${APP_NAME}.app" "${DIR_BUILD}/src/${APP_NAME}.zip"
+          
+          # Submit and wait with timeout (15 min max)
           xcrun notarytool submit "${DIR_BUILD}/src/${APP_NAME}.zip" \
             --apple-id "$MACOS_NOTARIZATION_APPLE_ID" \
             --password "$MACOS_NOTARIZATION_PWD" \
             --team-id "$MACOS_NOTARIZATION_TEAM_ID" \
-            --wait
+            --wait \
+            --timeout 15m
+          
           xcrun stapler staple "${DIR_BUILD}/src/${APP_NAME}.app"
           rm "${DIR_BUILD}/src/${APP_NAME}.zip"
+          
+      - name: Check Notarization Status
+        run: |
+          if [ "${{ steps.notarize.outcome }}" == "success" ]; then
+            echo "NOTARIZED=true" >> $GITHUB_ENV
+            echo "✅ Notarization successful"
+          else
+            echo "NOTARIZED=false" >> $GITHUB_ENV
+            echo "⚠️ Notarization failed or timed out - continuing with signed-only build"
+          fi
 
       - name: Build DMG package
         run: |
@@ -198,9 +215,9 @@ jobs:
           draft: false
           prerelease: false
           body: |
-            ## macOS Signed Build ✅
+            ## macOS Signed Build
             
-            This is a **signed and notarized** macOS build of Flameshot based on the official release **${{ env.UPSTREAM_TAG }}**.
+            This is a **signed** macOS build of Flameshot based on the official release **${{ env.UPSTREAM_TAG }}**.
             
             **Base version:** ${{ env.VERSION }}
             **Upstream release:** https://github.com/${{ env.UPSTREAM_REPO }}/releases/tag/${{ env.UPSTREAM_TAG }}
@@ -210,10 +227,7 @@ jobs:
             - `Flameshot-${{ env.VERSION }}-intel.dmg` - Intel Macs
             
             ### Verification
-            These packages are:
             - ✅ Code signed with Developer ID certificate
-            - ✅ Notarized by Apple
-            - ✅ Ready to install without Gatekeeper warnings
             
             ---
             *Built automatically from upstream release*
