@@ -146,7 +146,7 @@ jobs:
       - name: Notarize Application
         id: notarize
         continue-on-error: true
-        timeout-minutes: 20
+        timeout-minutes: 60
         env:
           MACOS_NOTARIZATION_APPLE_ID: ${{ secrets.MACOS_NOTARIZATION_APPLE_ID }}
           MACOS_NOTARIZATION_PWD: ${{ secrets.MACOS_NOTARIZATION_PWD }}
@@ -160,7 +160,7 @@ jobs:
             --password "$MACOS_NOTARIZATION_PWD" \
             --team-id "$MACOS_NOTARIZATION_TEAM_ID" \
             --wait \
-            --timeout 15m
+            --timeout 60m
           
           xcrun stapler staple "${DIR_BUILD}/src/${APP_NAME}.app"
           rm "${DIR_BUILD}/src/${APP_NAME}.zip"
