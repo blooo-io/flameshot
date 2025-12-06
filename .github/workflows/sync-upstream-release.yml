@@ -145,8 +145,7 @@ jobs:
 
       - name: Notarize Application
         id: notarize
-        continue-on-error: true
-        timeout-minutes: 60
+        timeout-minutes: 600
         env:
           MACOS_NOTARIZATION_APPLE_ID: ${{ secrets.MACOS_NOTARIZATION_APPLE_ID }}
           MACOS_NOTARIZATION_PWD: ${{ secrets.MACOS_NOTARIZATION_PWD }}
@@ -165,16 +164,6 @@ jobs:
           xcrun stapler staple "${DIR_BUILD}/src/${APP_NAME}.app"
           rm "${DIR_BUILD}/src/${APP_NAME}.zip"
           
-      - name: Check Notarization Status
-        run: |
-          if [ "${{ steps.notarize.outcome }}" == "success" ]; then
-            echo "NOTARIZED=true" >> $GITHUB_ENV
-            echo "✅ Notarization successful"
-          else
-            echo "NOTARIZED=false" >> $GITHUB_ENV
-            echo "⚠️ Notarization failed or timed out - continuing with signed-only build"
-          fi
-
       - name: Build DMG package
         run: |
           cd "${DIR_BUILD}"
@@ -189,6 +178,35 @@ jobs:
             "${DIR_BUILD}/src/Flameshot-${{ env.VERSION }}.dmg"
           # Verify DMG signature
           codesign --verify --verbose=4 "${DIR_BUILD}/src/Flameshot-${{ env.VERSION }}.dmg"
+
+      # ══════════════════════════════════════════════════════════════════════
+      # NOTARIZE THE DMG (required for Gatekeeper approval)
+      # ══════════════════════════════════════════════════════════════════════
+      - name: Notarize DMG
+        id: notarize_dmg
+        timeout-minutes: 60
+        env:
+          MACOS_NOTARIZATION_APPLE_ID: ${{ secrets.MACOS_NOTARIZATION_APPLE_ID }}
+          MACOS_NOTARIZATION_PWD: ${{ secrets.MACOS_NOTARIZATION_PWD }}
+          MACOS_NOTARIZATION_TEAM_ID: ${{ secrets.MACOS_NOTARIZATION_TEAM_ID }}
+        run: |
+          echo "Submitting DMG for notarization..."
+          
+          # Submit DMG to Apple for notarization
+          xcrun notarytool submit "${DIR_BUILD}/src/Flameshot-${{ env.VERSION }}.dmg" \
+            --apple-id "$MACOS_NOTARIZATION_APPLE_ID" \
+            --password "$MACOS_NOTARIZATION_PWD" \
+            --team-id "$MACOS_NOTARIZATION_TEAM_ID" \
+            --wait \
+            --timeout 60m
+          
+          # Staple the notarization ticket to the DMG
+          echo "Stapling notarization ticket to DMG..."
+          xcrun stapler staple "${DIR_BUILD}/src/Flameshot-${{ env.VERSION }}.dmg"
+          
+          # Verify notarization
+          echo "Verifying notarization..."
+          spctl --assess --type open --context context:primary-signature -v "${DIR_BUILD}/src/Flameshot-${{ env.VERSION }}.dmg"
 
       - name: Rename DMG for Release
         run: |
@@ -215,9 +233,9 @@ jobs:
           draft: false
           prerelease: false
           body: |
-            ## macOS Signed Build
+            ## macOS Signed & Notarized Build
             
-            This is a **signed** macOS build of Flameshot based on the official release **${{ env.UPSTREAM_TAG }}**.
+            This is a **signed and notarized** macOS build of Flameshot based on the official release **${{ env.UPSTREAM_TAG }}**.
             
             **Base version:** ${{ env.VERSION }}
             **Upstream release:** https://github.com/${{ env.UPSTREAM_REPO }}/releases/tag/${{ env.UPSTREAM_TAG }}
@@ -228,6 +246,7 @@ jobs:
             
             ### Verification
             - ✅ Code signed with Developer ID certificate
+            - ✅ Notarized by Apple (no Gatekeeper warnings)
             
             ---
             *Built automatically from upstream release*
