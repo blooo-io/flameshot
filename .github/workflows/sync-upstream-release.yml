@@ -159,7 +159,7 @@ jobs:
             --password "$MACOS_NOTARIZATION_PWD" \
             --team-id "$MACOS_NOTARIZATION_TEAM_ID" \
             --wait \
-            --timeout 60m
+            --timeout 600m
           
           xcrun stapler staple "${DIR_BUILD}/src/${APP_NAME}.app"
           rm "${DIR_BUILD}/src/${APP_NAME}.zip"
