@@ -120,6 +120,31 @@ jobs:
         run: cmake --build "${DIR_BUILD}"
 
       # ══════════════════════════════════════════════════════════════════════
+      # BUNDLE DEPENDENCIES (CRITICAL: upstream repo doesn't include this!)
+      # macdeployqt bundles Qt frameworks and their dependencies (brotli, etc.)
+      # into the app bundle so it can run standalone
+      # ══════════════════════════════════════════════════════════════════════
+      
+      - name: Deploy Qt Dependencies (macdeployqt)
+        run: |
+          # Find macdeployqt from the installed Qt
+          MACDEPLOYQT=$(brew --prefix qt6)/bin/macdeployqt
+          
+          if [ ! -f "$MACDEPLOYQT" ]; then
+            echo "❌ macdeployqt not found at $MACDEPLOYQT"
+            exit 1
+          fi
+          
+          echo "📦 Running macdeployqt to bundle Qt frameworks and dependencies..."
+          $MACDEPLOYQT "${DIR_BUILD}/src/${APP_NAME}.app" -verbose=2
+          
+          echo "✅ Qt dependencies deployed successfully"
+          
+          # List frameworks to verify bundling
+          echo "📋 Bundled frameworks:"
+          ls -la "${DIR_BUILD}/src/${APP_NAME}.app/Contents/Frameworks/" || true
+
+      # ══════════════════════════════════════════════════════════════════════
       # CODE SIGNING STEPS
       # ══════════════════════════════════════════════════════════════════════
       
@@ -153,10 +178,52 @@ jobs:
           # Verify signature
           codesign --verify --verbose=4 "${DIR_BUILD}/src/${APP_NAME}.app"
 
+      # ══════════════════════════════════════════════════════════════════════
+      # BUILD DMG PACKAGE
+      # Upstream repo doesn't have create_dmg CMake target, so we build manually
+      # ══════════════════════════════════════════════════════════════════════
+      
       - name: Build DMG package
         run: |
-          cd "${DIR_BUILD}"
-          ninja create_dmg
+          APP_PATH="${DIR_BUILD}/src/${APP_NAME}.app"
+          DMG_PATH="${DIR_BUILD}/src/Flameshot-${{ env.VERSION }}.dmg"
+          
+          echo "📦 Creating DMG from: $APP_PATH"
+          echo "📦 Output DMG: $DMG_PATH"
+          
+          # Remove any existing DMG
+          rm -f "$DMG_PATH"
+          
+          # Create temp directory for DMG contents
+          TEMP_DIR=$(mktemp -d)
+          echo "Using temp directory: $TEMP_DIR"
+          
+          # Copy app bundle to temp directory
+          cp -R "$APP_PATH" "$TEMP_DIR/"
+          
+          # Create Applications symlink for drag-to-install
+          ln -s /Applications "$TEMP_DIR/Applications"
+          
+          # Calculate size needed (add padding)
+          SIZE=$(du -sk "$TEMP_DIR" | cut -f1)
+          SIZE=$((SIZE + 10000))  # Add padding for DMG overhead
+          
+          echo "Creating DMG with size: ${SIZE}k"
+          
+          # Create compressed DMG
+          hdiutil create -srcfolder "$TEMP_DIR" \
+              -volname "Flameshot" \
+              -fs HFS+ \
+              -fsargs "-c c=64,a=16,e=16" \
+              -format UDZO \
+              -size ${SIZE}k \
+              "$DMG_PATH"
+          
+          # Cleanup temp directory
+          rm -rf "$TEMP_DIR"
+          
+          echo "✅ DMG created: $DMG_PATH"
+          ls -la "$DMG_PATH"
 
       - name: Code Sign DMG
         env:
