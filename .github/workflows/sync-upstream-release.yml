@@ -179,7 +179,109 @@ jobs:
           codesign --verify --verbose=4 "${DIR_BUILD}/src/${APP_NAME}.app"
 
       # ══════════════════════════════════════════════════════════════════════
-      # BUILD DMG PACKAGE
+      # NOTARIZE APP BUNDLE FIRST (before creating DMG)
+      # This ensures the app inside the DMG is properly stapled
+      # ══════════════════════════════════════════════════════════════════════
+      - name: Notarize App Bundle
+        id: notarize_app
+        if: ${{ github.event.inputs.skip_notarization != 'true' }}
+        continue-on-error: true
+        timeout-minutes: 45
+        env:
+          MACOS_NOTARIZATION_APPLE_ID: ${{ secrets.MACOS_NOTARIZATION_APPLE_ID }}
+          MACOS_NOTARIZATION_PWD: ${{ secrets.MACOS_NOTARIZATION_PWD }}
+          MACOS_NOTARIZATION_TEAM_ID: ${{ secrets.MACOS_NOTARIZATION_TEAM_ID }}
+        run: |
+          APP_PATH="${DIR_BUILD}/src/${APP_NAME}.app"
+          APP_ZIP="${DIR_BUILD}/src/${APP_NAME}.zip"
+          
+          # ─────────────────────────────────────────────────────────────────
+          # Step 1: Create ZIP of app for notarization submission
+          # ─────────────────────────────────────────────────────────────────
+          echo "📦 Creating ZIP of app for notarization..."
+          ditto -c -k --keepParent "$APP_PATH" "$APP_ZIP"
+          
+          # ─────────────────────────────────────────────────────────────────
+          # Step 2: Submit app for notarization
+          # ─────────────────────────────────────────────────────────────────
+          echo "📤 Submitting app for notarization..."
+          
+          SUBMIT_OUTPUT=$(xcrun notarytool submit "$APP_ZIP" \
+            --apple-id "$MACOS_NOTARIZATION_APPLE_ID" \
+            --password "$MACOS_NOTARIZATION_PWD" \
+            --team-id "$MACOS_NOTARIZATION_TEAM_ID" \
+            --output-format json 2>&1)
+          
+          echo "Submit response: $SUBMIT_OUTPUT"
+          
+          # Extract submission ID
+          SUBMISSION_ID=$(echo "$SUBMIT_OUTPUT" | grep -o '"id"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
+          
+          if [ -z "$SUBMISSION_ID" ]; then
+            echo "❌ Failed to get submission ID"
+            rm -f "$APP_ZIP"
+            exit 1
+          fi
+          
+          echo "✅ Submission ID: $SUBMISSION_ID"
+          rm -f "$APP_ZIP"  # Clean up ZIP
+          
+          # ─────────────────────────────────────────────────────────────────
+          # Step 3: Poll for completion
+          # ─────────────────────────────────────────────────────────────────
+          echo "⏳ Polling for app notarization status..."
+          
+          MAX_ATTEMPTS=60
+          POLL_INTERVAL=30
+          ATTEMPT=0
+          
+          while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+            ATTEMPT=$((ATTEMPT + 1))
+            echo "Poll attempt $ATTEMPT/$MAX_ATTEMPTS..."
+            
+            STATUS_OUTPUT=$(xcrun notarytool info "$SUBMISSION_ID" \
+              --apple-id "$MACOS_NOTARIZATION_APPLE_ID" \
+              --password "$MACOS_NOTARIZATION_PWD" \
+              --team-id "$MACOS_NOTARIZATION_TEAM_ID" 2>&1)
+            
+            echo "$STATUS_OUTPUT"
+            
+            if echo "$STATUS_OUTPUT" | grep -q "status: Accepted"; then
+              echo "✅ App notarization ACCEPTED!"
+              break
+            elif echo "$STATUS_OUTPUT" | grep -q "status: Invalid\|status: Rejected"; then
+              echo "❌ App notarization FAILED - fetching log..."
+              xcrun notarytool log "$SUBMISSION_ID" \
+                --apple-id "$MACOS_NOTARIZATION_APPLE_ID" \
+                --password "$MACOS_NOTARIZATION_PWD" \
+                --team-id "$MACOS_NOTARIZATION_TEAM_ID"
+              exit 1
+            fi
+            
+            if [ $ATTEMPT -lt $MAX_ATTEMPTS ]; then
+              echo "Status: In Progress - waiting ${POLL_INTERVAL}s..."
+              sleep $POLL_INTERVAL
+            fi
+          done
+          
+          if [ $ATTEMPT -ge $MAX_ATTEMPTS ]; then
+            echo "⏰ Timeout waiting for app notarization"
+            exit 1
+          fi
+          
+          # ─────────────────────────────────────────────────────────────────
+          # Step 4: Staple the app bundle
+          # ─────────────────────────────────────────────────────────────────
+          echo "📎 Stapling notarization ticket to app bundle..."
+          xcrun stapler staple "$APP_PATH"
+          
+          echo "🔍 Verifying app notarization..."
+          spctl --assess --type exec -v "$APP_PATH"
+          
+          echo "✅ App notarization and stapling complete!"
+
+      # ══════════════════════════════════════════════════════════════════════
+      # BUILD DMG PACKAGE (with stapled app inside)
       # Upstream repo doesn't have create_dmg CMake target, so we build manually
       # ══════════════════════════════════════════════════════════════════════
       
@@ -198,7 +300,7 @@ jobs:
           TEMP_DIR=$(mktemp -d)
           echo "Using temp directory: $TEMP_DIR"
           
-          # Copy app bundle to temp directory
+          # Copy app bundle (now stapled if notarization succeeded) to temp directory
           cp -R "$APP_PATH" "$TEMP_DIR/"
           
           # Create Applications symlink for drag-to-install
@@ -236,8 +338,7 @@ jobs:
           codesign --verify --verbose=4 "${DIR_BUILD}/src/Flameshot-${{ env.VERSION }}.dmg"
 
       # ══════════════════════════════════════════════════════════════════════
-      # NOTARIZE DMG (submit-then-poll approach for better timeout control)
-      # Based on: https://developer.apple.com/documentation/security/customizing-the-notarization-workflow
+      # NOTARIZE DMG (the DMG itself also needs notarization)
       # ══════════════════════════════════════════════════════════════════════
       - name: Notarize DMG
         id: notarize_dmg
@@ -251,9 +352,6 @@ jobs:
         run: |
           DMG_PATH="${DIR_BUILD}/src/Flameshot-${{ env.VERSION }}.dmg"
           
-          # ─────────────────────────────────────────────────────────────────
-          # Step 1: Submit for notarization (returns immediately)
-          # ─────────────────────────────────────────────────────────────────
           echo "📤 Submitting DMG for notarization..."
           
           SUBMIT_OUTPUT=$(xcrun notarytool submit "$DMG_PATH" \
@@ -264,7 +362,6 @@ jobs:
           
           echo "Submit response: $SUBMIT_OUTPUT"
           
-          # Extract submission ID from JSON response
           SUBMISSION_ID=$(echo "$SUBMIT_OUTPUT" | grep -o '"id"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
           
           if [ -z "$SUBMISSION_ID" ]; then
@@ -274,20 +371,16 @@ jobs:
           
           echo "✅ Submission ID: $SUBMISSION_ID"
           
-          # ─────────────────────────────────────────────────────────────────
-          # Step 2: Poll for completion (with controlled intervals)
-          # ─────────────────────────────────────────────────────────────────
-          echo "⏳ Polling for notarization status..."
+          echo "⏳ Polling for DMG notarization status..."
           
-          MAX_ATTEMPTS=60        # Max polling attempts
-          POLL_INTERVAL=30       # Seconds between polls
+          MAX_ATTEMPTS=60
+          POLL_INTERVAL=30
           ATTEMPT=0
           
           while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
             ATTEMPT=$((ATTEMPT + 1))
             echo "Poll attempt $ATTEMPT/$MAX_ATTEMPTS..."
             
-            # Get status using notarytool info
             STATUS_OUTPUT=$(xcrun notarytool info "$SUBMISSION_ID" \
               --apple-id "$MACOS_NOTARIZATION_APPLE_ID" \
               --password "$MACOS_NOTARIZATION_PWD" \
@@ -295,19 +388,11 @@ jobs:
             
             echo "$STATUS_OUTPUT"
             
-            # Check status
             if echo "$STATUS_OUTPUT" | grep -q "status: Accepted"; then
-              echo "✅ Notarization ACCEPTED!"
+              echo "✅ DMG notarization ACCEPTED!"
               break
-            elif echo "$STATUS_OUTPUT" | grep -q "status: Invalid"; then
-              echo "❌ Notarization INVALID - fetching log..."
-              xcrun notarytool log "$SUBMISSION_ID" \
-                --apple-id "$MACOS_NOTARIZATION_APPLE_ID" \
-                --password "$MACOS_NOTARIZATION_PWD" \
-                --team-id "$MACOS_NOTARIZATION_TEAM_ID"
-              exit 1
-            elif echo "$STATUS_OUTPUT" | grep -q "status: Rejected"; then
-              echo "❌ Notarization REJECTED - fetching log..."
+            elif echo "$STATUS_OUTPUT" | grep -q "status: Invalid\|status: Rejected"; then
+              echo "❌ DMG notarization FAILED - fetching log..."
               xcrun notarytool log "$SUBMISSION_ID" \
                 --apple-id "$MACOS_NOTARIZATION_APPLE_ID" \
                 --password "$MACOS_NOTARIZATION_PWD" \
@@ -315,29 +400,24 @@ jobs:
               exit 1
             fi
             
-            # Still in progress, wait before next poll
             if [ $ATTEMPT -lt $MAX_ATTEMPTS ]; then
               echo "Status: In Progress - waiting ${POLL_INTERVAL}s..."
               sleep $POLL_INTERVAL
             fi
           done
           
-          # Check if we timed out
           if [ $ATTEMPT -ge $MAX_ATTEMPTS ]; then
-            echo "⏰ Timeout waiting for notarization after $((MAX_ATTEMPTS * POLL_INTERVAL / 60)) minutes"
+            echo "⏰ Timeout waiting for DMG notarization"
             exit 1
           fi
           
-          # ─────────────────────────────────────────────────────────────────
-          # Step 3: Staple the notarization ticket
-          # ─────────────────────────────────────────────────────────────────
           echo "📎 Stapling notarization ticket to DMG..."
           xcrun stapler staple "$DMG_PATH"
           
-          echo "🔍 Verifying notarization..."
+          echo "🔍 Verifying DMG notarization..."
           spctl --assess --type open --context context:primary-signature -v "$DMG_PATH"
           
-          echo "✅ Notarization complete!"
+          echo "✅ DMG notarization complete!"
 
       # ══════════════════════════════════════════════════════════════════════
       # CHECK NOTARIZATION STATUS AND SET RELEASE NOTES
@@ -345,18 +425,28 @@ jobs:
       - name: Set Notarization Status
         id: notarization_status
         run: |
-          if [ "${{ steps.notarize_dmg.outcome }}" == "success" ]; then
+          APP_OUTCOME="${{ steps.notarize_app.outcome }}"
+          DMG_OUTCOME="${{ steps.notarize_dmg.outcome }}"
+          
+          echo "App notarization outcome: $APP_OUTCOME"
+          echo "DMG notarization outcome: $DMG_OUTCOME"
+          
+          if [ "$APP_OUTCOME" == "success" ] && [ "$DMG_OUTCOME" == "success" ]; then
             echo "NOTARIZED=true" >> $GITHUB_ENV
-            echo "NOTARIZE_STATUS=✅ Notarized by Apple (no Gatekeeper warnings)" >> $GITHUB_ENV
-            echo "✅ DMG notarization successful"
-          elif [ "${{ steps.notarize_dmg.outcome }}" == "skipped" ]; then
+            echo "NOTARIZE_STATUS=✅ Fully notarized by Apple (app + DMG stapled)" >> $GITHUB_ENV
+            echo "✅ Full notarization successful"
+          elif [ "$APP_OUTCOME" == "skipped" ] || [ "$DMG_OUTCOME" == "skipped" ]; then
             echo "NOTARIZED=false" >> $GITHUB_ENV
             echo "NOTARIZE_STATUS=⏭️ Notarization skipped (manual override)" >> $GITHUB_ENV
             echo "⏭️ Notarization was skipped by user request"
+          elif [ "$APP_OUTCOME" == "success" ]; then
+            echo "NOTARIZED=partial" >> $GITHUB_ENV
+            echo "NOTARIZE_STATUS=⚠️ App notarized, DMG notarization failed" >> $GITHUB_ENV
+            echo "⚠️ Partial notarization - app is stapled but DMG is not"
           else
             echo "NOTARIZED=false" >> $GITHUB_ENV
             echo "NOTARIZE_STATUS=⚠️ Notarization failed - users may see Gatekeeper warning" >> $GITHUB_ENV
-            echo "⚠️ DMG notarization failed or timed out - continuing with signed-only build"
+            echo "⚠️ Notarization failed or timed out - continuing with signed-only build"
           fi
 
       - name: Rename DMG for Release
